@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import TopBar from './components/TopBar.jsx'
 import SetLibrary from './components/SetLibrary.jsx'
 import BinderGrid from './components/BinderGrid.jsx'
+import IntentPreviewModal from './components/IntentPreviewModal.jsx'
 import { fetchAllSets } from './utils/pokemonTCGApi.js'
 import { calculateLayout } from './utils/layoutEngine.js'
 
@@ -13,30 +14,39 @@ const DEFAULT_SETTINGS = {
 }
 
 export default function App() {
-  const [sets, setSets]           = useState([])
-  const [manualSets, setManualSets] = useState([])
-  const [configs, setConfigs]     = useState({})
-  // { setId: { intent, baseIntent, secretIntent, groupId } }
-  const [groups, setGroups]       = useState({})
-  const [settings, setSettings]   = useState(() => {
+  const [sets, setSets]               = useState([])
+  const [manualSets, setManualSets]   = useState([])
+  // configs = pending (working) state — updates in real time
+  const [configs, setConfigs]         = useState({})
+  // committedConfigs = last confirmed baseline — only changes on Preview → Confirm
+  const [committedConfigs, setCommittedConfigs] = useState({})
+  const [groups, setGroups]           = useState({})
+  const [settings, setSettings]       = useState(() => {
     try {
       return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem('bp_settings') || '{}') }
     } catch { return DEFAULT_SETTINGS }
   })
-  const [syncing, setSyncing]     = useState(false)
-  const [error, setError]         = useState(null)
+  const [syncing, setSyncing]         = useState(false)
+  const [error, setError]             = useState(null)
+  const [previewOpen, setPreviewOpen] = useState(false)
 
   // ── Persistence ───────────────────────────────────────────────────────────
   useEffect(() => {
     try {
-      const s = localStorage.getItem('bp_sets')
-      const m = localStorage.getItem('bp_manual_sets')
-      const c = localStorage.getItem('bp_configs')
-      const g = localStorage.getItem('bp_groups')
-      if (s) setSets(JSON.parse(s))
-      if (m) setManualSets(JSON.parse(m))
-      if (c) setConfigs(JSON.parse(c))
-      if (g) setGroups(JSON.parse(g))
+      const s  = localStorage.getItem('bp_sets')
+      const m  = localStorage.getItem('bp_manual_sets')
+      const c  = localStorage.getItem('bp_configs')
+      const cc = localStorage.getItem('bp_configs_committed')
+      const g  = localStorage.getItem('bp_groups')
+      if (s)  setSets(JSON.parse(s))
+      if (m)  setManualSets(JSON.parse(m))
+      if (c)  {
+        const parsed = JSON.parse(c)
+        setConfigs(parsed)
+        // If no committed snapshot exists yet, use current configs as the baseline
+        setCommittedConfigs(cc ? JSON.parse(cc) : parsed)
+      }
+      if (g)  setGroups(JSON.parse(g))
     } catch {}
   }, [])
 
@@ -61,17 +71,46 @@ export default function App() {
   }
 
   // ── Intent handlers ───────────────────────────────────────────────────────
-  // Combined mode intent
   const updateIntent = (setId, intent) => {
     setConfigs(prev => ({ ...prev, [setId]: { ...prev[setId], intent: intent || null } }))
   }
-  // Separated mode intents
   const updateBaseIntent = (setId, value) => {
     setConfigs(prev => ({ ...prev, [setId]: { ...prev[setId], baseIntent: value || null } }))
   }
   const updateSecretIntent = (setId, value) => {
     setConfigs(prev => ({ ...prev, [setId]: { ...prev[setId], secretIntent: value || null } }))
   }
+
+  // ── Preview commit / revert ───────────────────────────────────────────────
+  const confirmPreview = () => {
+    setCommittedConfigs(configs)
+    localStorage.setItem('bp_configs_committed', JSON.stringify(configs))
+    setPreviewOpen(false)
+  }
+
+  const cancelPreview = () => {
+    // Revert all pending intent changes back to the committed baseline
+    setConfigs(committedConfigs)
+    setPreviewOpen(false)
+  }
+
+  // Count sets whose intent fields differ between pending and committed
+  const pendingChangeCount = useMemo(() => {
+    const allIds = new Set([
+      ...Object.keys(configs),
+      ...Object.keys(committedConfigs),
+    ])
+    let count = 0
+    for (const id of allIds) {
+      const c  = configs[id]
+      const cc = committedConfigs[id]
+      const intentChanged       = (c?.intent       ?? null) !== (cc?.intent       ?? null)
+      const baseIntentChanged   = (c?.baseIntent   ?? null) !== (cc?.baseIntent   ?? null)
+      const secretIntentChanged = (c?.secretIntent ?? null) !== (cc?.secretIntent ?? null)
+      if (intentChanged || baseIntentChanged || secretIntentChanged) count++
+    }
+    return count
+  }, [configs, committedConfigs])
 
   // ── Group handlers ────────────────────────────────────────────────────────
   const createGroup = (name) => {
@@ -98,13 +137,12 @@ export default function App() {
 
   // ── Manual set handlers ───────────────────────────────────────────────────
   const addManualSet = (formData) => {
-    const newSet = {
+    setManualSets(prev => [...prev, {
       ...formData,
       id: `manual-${Date.now()}`,
       total: formData.printedTotal + formData.secretCount,
       isManual: true,
-    }
-    setManualSets(prev => [...prev, newSet])
+    }])
   }
   const editManualSet = (id, formData) => {
     setManualSets(prev =>
@@ -119,11 +157,10 @@ export default function App() {
     setConfigs(prev => { const next = { ...prev }; delete next[id]; return next })
   }
 
-  // ── Sorted + annotated sets ───────────────────────────────────────────────
-  const setsWithConfig = useMemo(() => {
+  // ── Sorted sets (shared structure for both pending and committed) ──────────
+  const sortedSets = useMemo(() => {
     const combined = [...sets, ...manualSets]
-
-    // Build anchor dates for groups
+    // Group anchor dates use pending configs (so the live sort reflects pending)
     const anchorDates = {}
     for (const s of combined) {
       const gid = configs[s.id]?.groupId
@@ -131,10 +168,9 @@ export default function App() {
         if (!anchorDates[gid] || s.releaseDate < anchorDates[gid]) anchorDates[gid] = s.releaseDate
       }
     }
-
     combined.sort((a, b) => {
-      const aGid = configs[a.id]?.groupId
-      const bGid = configs[b.id]?.groupId
+      const aGid  = configs[a.id]?.groupId
+      const bGid  = configs[b.id]?.groupId
       const aDate = (aGid && anchorDates[aGid]) ? anchorDates[aGid] : (a.releaseDate ?? '')
       const bDate = (bGid && anchorDates[bGid]) ? anchorDates[bGid] : (b.releaseDate ?? '')
       if (!aDate && !bDate) return 0
@@ -143,59 +179,86 @@ export default function App() {
       if (aDate !== bDate) return aDate.localeCompare(bDate)
       return (a.releaseDate ?? '').localeCompare(b.releaseDate ?? '')
     })
+    return combined
+  }, [sets, manualSets, configs])
 
-    return combined.map(s => ({
+  // Pending (live) sets with config
+  const setsWithConfig = useMemo(() =>
+    sortedSets.map(s => ({
       ...s,
       intent:       configs[s.id]?.intent       ?? null,
       baseIntent:   configs[s.id]?.baseIntent   ?? null,
       secretIntent: configs[s.id]?.secretIntent ?? null,
       groupId:      configs[s.id]?.groupId      ?? null,
-    }))
-  }, [sets, manualSets, configs])
+    })),
+    [sortedSets, configs]
+  )
 
-  // ── Layout calculation ────────────────────────────────────────────────────
+  // Committed (before) sets with config — same sort order, different intents
+  const committedSetsWithConfig = useMemo(() =>
+    sortedSets.map(s => ({
+      ...s,
+      intent:       committedConfigs[s.id]?.intent       ?? null,
+      baseIntent:   committedConfigs[s.id]?.baseIntent   ?? null,
+      secretIntent: committedConfigs[s.id]?.secretIntent ?? null,
+      groupId:      committedConfigs[s.id]?.groupId      ?? null,
+    })),
+    [sortedSets, committedConfigs]
+  )
+
+  // ── Layout calculations ───────────────────────────────────────────────────
   const isSeparated = settings.collectionMode === 'separated'
 
-  // Combined mode — single layout as before
+  // Pending layouts
   const binders = useMemo(
     () => !isSeparated ? calculateLayout(setsWithConfig, settings) : [],
     [setsWithConfig, settings, isSeparated]
   )
-
-  // Separated mode — two independent layouts
-  // Base pool: sets where baseIntent === 'collect', treated as intent='base'
   const baseBinders = useMemo(() => {
     if (!isSeparated) return []
-    const baseSets = setsWithConfig
-      .filter(s => s.baseIntent === 'collect' && s.printedTotal > 0)
-      .map(s => ({ ...s, intent: 'base' }))
-    return calculateLayout(baseSets, settings)
+    return calculateLayout(
+      setsWithConfig.filter(s => s.baseIntent === 'collect' && s.printedTotal > 0).map(s => ({ ...s, intent: 'base' })),
+      settings
+    )
   }, [setsWithConfig, settings, isSeparated])
-
-  // Secrets pool: sets where secretIntent === 'collect', treated as intent='secret'
   const secretBinders = useMemo(() => {
     if (!isSeparated) return []
-    const secretSets = setsWithConfig
-      .filter(s => s.secretIntent === 'collect' && s.secretCount > 0)
-      .map(s => ({ ...s, intent: 'secret' }))
-    return calculateLayout(secretSets, settings)
+    return calculateLayout(
+      setsWithConfig.filter(s => s.secretIntent === 'collect' && s.secretCount > 0).map(s => ({ ...s, intent: 'secret' })),
+      settings
+    )
   }, [setsWithConfig, settings, isSeparated])
 
-  // ── Stats ─────────────────────────────────────────────────────────────────
+  // Committed (before) layouts — used only in the preview modal
+  const committedBinders = useMemo(
+    () => !isSeparated ? calculateLayout(committedSetsWithConfig, settings) : [],
+    [committedSetsWithConfig, settings, isSeparated]
+  )
+  const committedBaseBinders = useMemo(() => {
+    if (!isSeparated) return []
+    return calculateLayout(
+      committedSetsWithConfig.filter(s => s.baseIntent === 'collect' && s.printedTotal > 0).map(s => ({ ...s, intent: 'base' })),
+      settings
+    )
+  }, [committedSetsWithConfig, settings, isSeparated])
+  const committedSecretBinders = useMemo(() => {
+    if (!isSeparated) return []
+    return calculateLayout(
+      committedSetsWithConfig.filter(s => s.secretIntent === 'collect' && s.secretCount > 0).map(s => ({ ...s, intent: 'secret' })),
+      settings
+    )
+  }, [committedSetsWithConfig, settings, isSeparated])
+
+  // ── Stats (pending) ───────────────────────────────────────────────────────
   const stats = useMemo(() => {
     if (isSeparated) {
-      const baseCards    = baseBinders.reduce((s, b) => s + b.usedSlots, 0)
-      const secretCards  = secretBinders.reduce((s, b) => s + b.usedSlots, 0)
-      const setsPlanned  = setsWithConfig.filter(
-        s => s.baseIntent === 'collect' || s.secretIntent === 'collect'
-      ).length
       return {
         mode: 'separated',
         baseBindersNeeded:   baseBinders.length,
         secretBindersNeeded: secretBinders.length,
-        baseCards,
-        secretCards,
-        setsPlanned,
+        baseCards:    baseBinders.reduce((s, b) => s + b.usedSlots, 0),
+        secretCards:  secretBinders.reduce((s, b) => s + b.usedSlots, 0),
+        setsPlanned:  setsWithConfig.filter(s => s.baseIntent === 'collect' || s.secretIntent === 'collect').length,
       }
     }
     return {
@@ -217,6 +280,8 @@ export default function App() {
         settings={settings}
         onSettingsChange={setSettings}
         hasSets={hasSets}
+        pendingChangeCount={pendingChangeCount}
+        onOpenPreview={() => setPreviewOpen(true)}
       />
 
       {error && (
@@ -252,6 +317,25 @@ export default function App() {
             groups={groups}
           />
         </div>
+      )}
+
+      {previewOpen && (
+        <IntentPreviewModal
+          collectionMode={settings.collectionMode}
+          // Before (committed)
+          beforeBinders={committedBinders}
+          beforeBaseBinders={committedBaseBinders}
+          beforeSecretBinders={committedSecretBinders}
+          beforeSets={committedSetsWithConfig}
+          // After (pending)
+          afterBinders={binders}
+          afterBaseBinders={baseBinders}
+          afterSecretBinders={secretBinders}
+          afterSets={setsWithConfig}
+          groups={groups}
+          onConfirm={confirmPreview}
+          onCancel={cancelPreview}
+        />
       )}
     </div>
   )

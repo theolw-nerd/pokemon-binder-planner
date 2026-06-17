@@ -6,7 +6,7 @@ const SPACING_OPTIONS = [
   { value: 'slots', label: 'X empty slots' },
 ]
 
-export default function TopBar({ stats, syncing, onSync, settings, onSettingsChange, hasSets }) {
+export default function TopBar({ stats, syncing, onSync, settings, onSettingsChange, hasSets, pendingChangeCount, onOpenPreview }) {
   const update = (key, value) =>
     onSettingsChange(prev => ({ ...prev, [key]: value }))
 
@@ -110,6 +110,16 @@ export default function TopBar({ stats, syncing, onSync, settings, onSettingsCha
       )}
 
       <div className="flex-1" />
+
+      {/* Preview button — only shown when there are uncommitted intent changes */}
+      {hasSets && pendingChangeCount > 0 && (
+        <button
+          onClick={onOpenPreview}
+          className="text-xs px-3 py-1.5 rounded border border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100 font-medium transition-colors whitespace-nowrap"
+        >
+          Preview changes ({pendingChangeCount})
+        </button>
+      )}
 
       <button
         onClick={onSync}
