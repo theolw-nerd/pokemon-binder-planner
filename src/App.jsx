@@ -13,8 +13,9 @@ const DEFAULT_SETTINGS = {
 }
 
 export default function App() {
-  const [sets, setSets] = useState([])
-  const [configs, setConfigs] = useState({}) // { setId: { intent } }
+  const [sets, setSets] = useState([])           // sets from the Pokémon TCG API
+  const [manualSets, setManualSets] = useState([]) // sets added manually by the user
+  const [configs, setConfigs] = useState({})     // user intent per set: { setId: { intent } }
   const [settings, setSettings] = useState(() => {
     try {
       return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem('bp_settings') || '{}') }
@@ -25,24 +26,22 @@ export default function App() {
   const [syncing, setSyncing] = useState(false)
   const [error, setError] = useState(null)
 
-  // Load cached sets and configs on first load
+  // Load all cached data on first load
   useEffect(() => {
     try {
       const s = localStorage.getItem('bp_sets')
+      const m = localStorage.getItem('bp_manual_sets')
       const c = localStorage.getItem('bp_configs')
       if (s) setSets(JSON.parse(s))
+      if (m) setManualSets(JSON.parse(m))
       if (c) setConfigs(JSON.parse(c))
     } catch {}
   }, [])
 
-  // Persist settings and configs whenever they change
-  useEffect(() => {
-    localStorage.setItem('bp_settings', JSON.stringify(settings))
-  }, [settings])
-
-  useEffect(() => {
-    localStorage.setItem('bp_configs', JSON.stringify(configs))
-  }, [configs])
+  // Persist everything whenever it changes
+  useEffect(() => { localStorage.setItem('bp_settings', JSON.stringify(settings)) }, [settings])
+  useEffect(() => { localStorage.setItem('bp_configs', JSON.stringify(configs)) }, [configs])
+  useEffect(() => { localStorage.setItem('bp_manual_sets', JSON.stringify(manualSets)) }, [manualSets])
 
   const syncSets = async () => {
     setSyncing(true)
@@ -58,6 +57,39 @@ export default function App() {
     }
   }
 
+  // --- Manual set handlers ---
+
+  const addManualSet = (formData) => {
+    const newSet = {
+      ...formData,
+      id: `manual-${Date.now()}`,
+      total: formData.printedTotal + formData.secretCount,
+      isManual: true,
+    }
+    setManualSets(prev => [...prev, newSet])
+  }
+
+  const editManualSet = (id, formData) => {
+    setManualSets(prev =>
+      prev.map(s => s.id === id
+        ? { ...s, ...formData, total: formData.printedTotal + formData.secretCount }
+        : s
+      )
+    )
+  }
+
+  const deleteManualSet = (id) => {
+    setManualSets(prev => prev.filter(s => s.id !== id))
+    // Clean up any saved intent for the deleted set
+    setConfigs(prev => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+  }
+
+  // --- Intent handler ---
+
   const updateIntent = (setId, intent) => {
     setConfigs(prev => ({
       ...prev,
@@ -65,11 +97,17 @@ export default function App() {
     }))
   }
 
-  // Merge API set data with user-defined configs
-  const setsWithConfig = useMemo(
-    () => sets.map(s => ({ ...s, intent: configs[s.id]?.intent ?? null })),
-    [sets, configs]
-  )
+  // Merge API sets + manual sets, sort by release date (no date → end), attach intents
+  const setsWithConfig = useMemo(() => {
+    const combined = [...sets, ...manualSets]
+    combined.sort((a, b) => {
+      if (!a.releaseDate && !b.releaseDate) return 0
+      if (!a.releaseDate) return 1
+      if (!b.releaseDate) return -1
+      return a.releaseDate.localeCompare(b.releaseDate)
+    })
+    return combined.map(s => ({ ...s, intent: configs[s.id]?.intent ?? null }))
+  }, [sets, manualSets, configs])
 
   // Compute binder layout whenever sets or settings change
   const binders = useMemo(
@@ -83,6 +121,8 @@ export default function App() {
     totalCards: binders.reduce((sum, b) => sum + b.usedSlots, 0),
   }), [binders, setsWithConfig])
 
+  const hasSets = sets.length > 0 || manualSets.length > 0
+
   return (
     <div className="flex flex-col h-screen bg-gray-50 text-gray-900 text-sm">
       <TopBar
@@ -91,7 +131,7 @@ export default function App() {
         onSync={syncSets}
         settings={settings}
         onSettingsChange={setSettings}
-        hasSets={sets.length > 0}
+        hasSets={hasSets}
       />
 
       {error && (
@@ -100,18 +140,18 @@ export default function App() {
         </div>
       )}
 
-      {sets.length === 0 ? (
+      {!hasSets ? (
         <EmptyState onSync={syncSets} syncing={syncing} />
       ) : (
         <div className="flex flex-1 overflow-hidden">
           <SetLibrary
             sets={setsWithConfig}
             onUpdateIntent={updateIntent}
+            onAddManualSet={addManualSet}
+            onEditManualSet={editManualSet}
+            onDeleteManualSet={deleteManualSet}
           />
-          <BinderGrid
-            binders={binders}
-            settings={settings}
-          />
+          <BinderGrid binders={binders} settings={settings} />
         </div>
       )}
     </div>
