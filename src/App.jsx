@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import TopBar from './components/TopBar.jsx'
 import SetLibrary from './components/SetLibrary.jsx'
 import BinderGrid from './components/BinderGrid.jsx'
@@ -13,13 +13,21 @@ const DEFAULT_SETTINGS = {
   collectionMode: 'combined',
 }
 
+function moveItem(arr, fromIdx, toIdx) {
+  const next = [...arr]
+  const [item] = next.splice(fromIdx, 1)
+  next.splice(toIdx, 0, item)
+  return next
+}
+
 export default function App() {
   const [sets, setSets]               = useState([])
   const [manualSets, setManualSets]   = useState([])
-  // configs = pending (working) state — updates in real time
   const [configs, setConfigs]         = useState({})
-  // committedConfigs = last confirmed baseline — only changes on Preview → Confirm
   const [committedConfigs, setCommittedConfigs] = useState({})
+  // manualOrder: array of all set IDs in user-defined sequence; [] = use date sort
+  const [manualOrder, setManualOrder]           = useState([])
+  const [committedManualOrder, setCommittedManualOrder] = useState([])
   const [groups, setGroups]           = useState({})
   const [settings, setSettings]       = useState(() => {
     try {
@@ -33,27 +41,31 @@ export default function App() {
   // ── Persistence ───────────────────────────────────────────────────────────
   useEffect(() => {
     try {
-      const s  = localStorage.getItem('bp_sets')
-      const m  = localStorage.getItem('bp_manual_sets')
-      const c  = localStorage.getItem('bp_configs')
-      const cc = localStorage.getItem('bp_configs_committed')
-      const g  = localStorage.getItem('bp_groups')
+      const s   = localStorage.getItem('bp_sets')
+      const m   = localStorage.getItem('bp_manual_sets')
+      const c   = localStorage.getItem('bp_configs')
+      const cc  = localStorage.getItem('bp_configs_committed')
+      const mo  = localStorage.getItem('bp_manual_order')
+      const moc = localStorage.getItem('bp_manual_order_committed')
+      const g   = localStorage.getItem('bp_groups')
       if (s)  setSets(JSON.parse(s))
       if (m)  setManualSets(JSON.parse(m))
       if (c)  {
         const parsed = JSON.parse(c)
         setConfigs(parsed)
-        // If no committed snapshot exists yet, use current configs as the baseline
         setCommittedConfigs(cc ? JSON.parse(cc) : parsed)
       }
-      if (g)  setGroups(JSON.parse(g))
+      if (mo)  { const parsed = JSON.parse(mo);  setManualOrder(parsed) }
+      if (moc) { const parsed = JSON.parse(moc); setCommittedManualOrder(parsed) }
+      if (g)   setGroups(JSON.parse(g))
     } catch {}
   }, [])
 
-  useEffect(() => { localStorage.setItem('bp_settings',    JSON.stringify(settings))   }, [settings])
-  useEffect(() => { localStorage.setItem('bp_configs',     JSON.stringify(configs))    }, [configs])
-  useEffect(() => { localStorage.setItem('bp_manual_sets', JSON.stringify(manualSets)) }, [manualSets])
-  useEffect(() => { localStorage.setItem('bp_groups',      JSON.stringify(groups))     }, [groups])
+  useEffect(() => { localStorage.setItem('bp_settings',    JSON.stringify(settings))    }, [settings])
+  useEffect(() => { localStorage.setItem('bp_configs',     JSON.stringify(configs))     }, [configs])
+  useEffect(() => { localStorage.setItem('bp_manual_sets', JSON.stringify(manualSets))  }, [manualSets])
+  useEffect(() => { localStorage.setItem('bp_groups',      JSON.stringify(groups))      }, [groups])
+  useEffect(() => { localStorage.setItem('bp_manual_order', JSON.stringify(manualOrder)) }, [manualOrder])
 
   // ── API sync ──────────────────────────────────────────────────────────────
   const syncSets = async () => {
@@ -84,33 +96,32 @@ export default function App() {
   // ── Preview commit / revert ───────────────────────────────────────────────
   const confirmPreview = () => {
     setCommittedConfigs(configs)
+    setCommittedManualOrder(manualOrder)
     localStorage.setItem('bp_configs_committed', JSON.stringify(configs))
+    localStorage.setItem('bp_manual_order_committed', JSON.stringify(manualOrder))
     setPreviewOpen(false)
   }
 
   const cancelPreview = () => {
-    // Revert all pending intent changes back to the committed baseline
     setConfigs(committedConfigs)
+    setManualOrder(committedManualOrder)
     setPreviewOpen(false)
   }
 
-  // Count sets whose intent fields differ between pending and committed
+  // Pending change count (intent changes + order change)
   const pendingChangeCount = useMemo(() => {
-    const allIds = new Set([
-      ...Object.keys(configs),
-      ...Object.keys(committedConfigs),
-    ])
-    let count = 0
+    const allIds = new Set([...Object.keys(configs), ...Object.keys(committedConfigs)])
+    let intentChanges = 0
     for (const id of allIds) {
       const c  = configs[id]
       const cc = committedConfigs[id]
-      const intentChanged       = (c?.intent       ?? null) !== (cc?.intent       ?? null)
-      const baseIntentChanged   = (c?.baseIntent   ?? null) !== (cc?.baseIntent   ?? null)
-      const secretIntentChanged = (c?.secretIntent ?? null) !== (cc?.secretIntent ?? null)
-      if (intentChanged || baseIntentChanged || secretIntentChanged) count++
+      if ((c?.intent ?? null)       !== (cc?.intent ?? null))       intentChanges++
+      else if ((c?.baseIntent ?? null)   !== (cc?.baseIntent ?? null))   intentChanges++
+      else if ((c?.secretIntent ?? null) !== (cc?.secretIntent ?? null)) intentChanges++
     }
-    return count
-  }, [configs, committedConfigs])
+    const orderChanged = JSON.stringify(manualOrder) !== JSON.stringify(committedManualOrder)
+    return intentChanges + (orderChanged ? 1 : 0)
+  }, [configs, committedConfigs, manualOrder, committedManualOrder])
 
   // ── Group handlers ────────────────────────────────────────────────────────
   const createGroup = (name) => {
@@ -155,34 +166,72 @@ export default function App() {
   const deleteManualSet = (id) => {
     setManualSets(prev => prev.filter(s => s.id !== id))
     setConfigs(prev => { const next = { ...prev }; delete next[id]; return next })
+    setManualOrder(prev => prev.filter(sid => sid !== id))
   }
 
-  // ── Sorted sets (shared structure for both pending and committed) ──────────
+  // ── sortedSets: date-based or manual order ────────────────────────────────
   const sortedSets = useMemo(() => {
     const combined = [...sets, ...manualSets]
-    // Group anchor dates use pending configs (so the live sort reflects pending)
-    const anchorDates = {}
-    for (const s of combined) {
-      const gid = configs[s.id]?.groupId
-      if (gid && s.releaseDate) {
-        if (!anchorDates[gid] || s.releaseDate < anchorDates[gid]) anchorDates[gid] = s.releaseDate
-      }
-    }
-    combined.sort((a, b) => {
-      const aGid  = configs[a.id]?.groupId
-      const bGid  = configs[b.id]?.groupId
-      const aDate = (aGid && anchorDates[aGid]) ? anchorDates[aGid] : (a.releaseDate ?? '')
-      const bDate = (bGid && anchorDates[bGid]) ? anchorDates[bGid] : (b.releaseDate ?? '')
-      if (!aDate && !bDate) return 0
-      if (!aDate) return 1
-      if (!bDate) return -1
-      if (aDate !== bDate) return aDate.localeCompare(bDate)
-      return (a.releaseDate ?? '').localeCompare(b.releaseDate ?? '')
-    })
-    return combined
-  }, [sets, manualSets, configs])
 
-  // Pending (live) sets with config
+    if (manualOrder.length > 0) {
+      // Manual order: use the stored sequence; new/unknown sets fall to the end
+      const posMap = Object.fromEntries(manualOrder.map((id, i) => [id, i]))
+      combined.sort((a, b) => {
+        const posA = posMap[a.id] ?? Infinity
+        const posB = posMap[b.id] ?? Infinity
+        if (posA !== posB) return posA - posB
+        return (a.releaseDate ?? '').localeCompare(b.releaseDate ?? '')
+      })
+    } else {
+      // Date sort with group anchors
+      const anchorDates = {}
+      for (const s of combined) {
+        const gid = configs[s.id]?.groupId
+        if (gid && s.releaseDate) {
+          if (!anchorDates[gid] || s.releaseDate < anchorDates[gid]) anchorDates[gid] = s.releaseDate
+        }
+      }
+      combined.sort((a, b) => {
+        const aGid  = configs[a.id]?.groupId
+        const bGid  = configs[b.id]?.groupId
+        const aDate = (aGid && anchorDates[aGid]) ? anchorDates[aGid] : (a.releaseDate ?? '')
+        const bDate = (bGid && anchorDates[bGid]) ? anchorDates[bGid] : (b.releaseDate ?? '')
+        if (!aDate && !bDate) return 0
+        if (!aDate) return 1
+        if (!bDate) return -1
+        if (aDate !== bDate) return aDate.localeCompare(bDate)
+        return (a.releaseDate ?? '').localeCompare(b.releaseDate ?? '')
+      })
+    }
+
+    return combined
+  }, [sets, manualSets, configs, manualOrder])
+
+  // Ref so handleReorder always sees the latest sortedSets without stale closure
+  const sortedSetsRef = useRef(sortedSets)
+  useEffect(() => { sortedSetsRef.current = sortedSets }, [sortedSets])
+
+  // ── Drag-and-drop reorder ─────────────────────────────────────────────────
+  const handleReorder = useCallback((activeId, overId) => {
+    setManualOrder(prev => {
+      // Initialize from date sort if no manual order yet
+      const currentOrder = prev.length > 0
+        ? prev
+        : sortedSetsRef.current.map(s => s.id)
+
+      const oldIdx = currentOrder.indexOf(activeId)
+      const newIdx = currentOrder.indexOf(overId)
+      if (oldIdx === -1 || newIdx === -1) return prev
+
+      return moveItem(currentOrder, oldIdx, newIdx)
+    })
+  }, [])
+
+  const handleResetOrder = useCallback(() => {
+    setManualOrder([])
+  }, [])
+
+  // ── setsWithConfig (pending and committed) ────────────────────────────────
   const setsWithConfig = useMemo(() =>
     sortedSets.map(s => ({
       ...s,
@@ -194,22 +243,54 @@ export default function App() {
     [sortedSets, configs]
   )
 
-  // Committed (before) sets with config — same sort order, different intents
+  // Committed sets — same sort order, committed intents
+  const committedSortedSets = useMemo(() => {
+    const combined = [...sets, ...manualSets]
+    if (committedManualOrder.length > 0) {
+      const posMap = Object.fromEntries(committedManualOrder.map((id, i) => [id, i]))
+      combined.sort((a, b) => {
+        const posA = posMap[a.id] ?? Infinity
+        const posB = posMap[b.id] ?? Infinity
+        if (posA !== posB) return posA - posB
+        return (a.releaseDate ?? '').localeCompare(b.releaseDate ?? '')
+      })
+    } else {
+      const anchorDates = {}
+      for (const s of combined) {
+        const gid = committedConfigs[s.id]?.groupId
+        if (gid && s.releaseDate) {
+          if (!anchorDates[gid] || s.releaseDate < anchorDates[gid]) anchorDates[gid] = s.releaseDate
+        }
+      }
+      combined.sort((a, b) => {
+        const aGid  = committedConfigs[a.id]?.groupId
+        const bGid  = committedConfigs[b.id]?.groupId
+        const aDate = (aGid && anchorDates[aGid]) ? anchorDates[aGid] : (a.releaseDate ?? '')
+        const bDate = (bGid && anchorDates[bGid]) ? anchorDates[bGid] : (b.releaseDate ?? '')
+        if (!aDate && !bDate) return 0
+        if (!aDate) return 1
+        if (!bDate) return -1
+        if (aDate !== bDate) return aDate.localeCompare(bDate)
+        return (a.releaseDate ?? '').localeCompare(b.releaseDate ?? '')
+      })
+    }
+    return combined
+  }, [sets, manualSets, committedConfigs, committedManualOrder])
+
   const committedSetsWithConfig = useMemo(() =>
-    sortedSets.map(s => ({
+    committedSortedSets.map(s => ({
       ...s,
       intent:       committedConfigs[s.id]?.intent       ?? null,
       baseIntent:   committedConfigs[s.id]?.baseIntent   ?? null,
       secretIntent: committedConfigs[s.id]?.secretIntent ?? null,
       groupId:      committedConfigs[s.id]?.groupId      ?? null,
     })),
-    [sortedSets, committedConfigs]
+    [committedSortedSets, committedConfigs]
   )
 
   // ── Layout calculations ───────────────────────────────────────────────────
   const isSeparated = settings.collectionMode === 'separated'
 
-  // Pending layouts
   const binders = useMemo(
     () => !isSeparated ? calculateLayout(setsWithConfig, settings) : [],
     [setsWithConfig, settings, isSeparated]
@@ -229,7 +310,6 @@ export default function App() {
     )
   }, [setsWithConfig, settings, isSeparated])
 
-  // Committed (before) layouts — used only in the preview modal
   const committedBinders = useMemo(
     () => !isSeparated ? calculateLayout(committedSetsWithConfig, settings) : [],
     [committedSetsWithConfig, settings, isSeparated]
@@ -249,16 +329,16 @@ export default function App() {
     )
   }, [committedSetsWithConfig, settings, isSeparated])
 
-  // ── Stats (pending) ───────────────────────────────────────────────────────
+  // ── Stats ─────────────────────────────────────────────────────────────────
   const stats = useMemo(() => {
     if (isSeparated) {
       return {
         mode: 'separated',
         baseBindersNeeded:   baseBinders.length,
         secretBindersNeeded: secretBinders.length,
-        baseCards:    baseBinders.reduce((s, b) => s + b.usedSlots, 0),
-        secretCards:  secretBinders.reduce((s, b) => s + b.usedSlots, 0),
-        setsPlanned:  setsWithConfig.filter(s => s.baseIntent === 'collect' || s.secretIntent === 'collect').length,
+        baseCards:   baseBinders.reduce((s, b) => s + b.usedSlots, 0),
+        secretCards: secretBinders.reduce((s, b) => s + b.usedSlots, 0),
+        setsPlanned: setsWithConfig.filter(s => s.baseIntent === 'collect' || s.secretIntent === 'collect').length,
       }
     }
     return {
@@ -315,6 +395,9 @@ export default function App() {
             baseBinders={baseBinders}
             secretBinders={secretBinders}
             groups={groups}
+            hasManualOrder={manualOrder.length > 0}
+            onReorder={handleReorder}
+            onResetOrder={handleResetOrder}
           />
         </div>
       )}
@@ -322,12 +405,10 @@ export default function App() {
       {previewOpen && (
         <IntentPreviewModal
           collectionMode={settings.collectionMode}
-          // Before (committed)
           beforeBinders={committedBinders}
           beforeBaseBinders={committedBaseBinders}
           beforeSecretBinders={committedSecretBinders}
           beforeSets={committedSetsWithConfig}
-          // After (pending)
           afterBinders={binders}
           afterBaseBinders={baseBinders}
           afterSecretBinders={secretBinders}
