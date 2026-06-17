@@ -16,9 +16,59 @@ export default function TopBar({ stats, syncing, onSync, settings, onSettingsCha
 
       {hasSets && (
         <>
-          <StatChip label="Binders needed"  value={stats.bindersNeeded} />
-          <StatChip label="Sets planned"    value={stats.setsPlanned} />
-          <StatChip label="Cards"           value={stats.totalCards.toLocaleString()} />
+          {/* Stats — combined mode */}
+          {stats.mode === 'combined' && (
+            <>
+              <StatChip label="Binders needed" value={stats.bindersNeeded} />
+              <StatChip label="Sets planned"   value={stats.setsPlanned} />
+              <StatChip label="Cards"          value={stats.totalCards.toLocaleString()} />
+            </>
+          )}
+
+          {/* Stats — separated mode */}
+          {stats.mode === 'separated' && (
+            <>
+              <StatChip
+                label="Base binders"
+                value={stats.baseBindersNeeded}
+                sub={stats.baseCards.toLocaleString() + ' cards'}
+                color="#3B82F6"
+              />
+              <StatChip
+                label="Secret binders"
+                value={stats.secretBindersNeeded}
+                sub={stats.secretCards.toLocaleString() + ' cards'}
+                color="#8B5CF6"
+              />
+              <StatChip label="Sets planned" value={stats.setsPlanned} />
+            </>
+          )}
+
+          <div className="h-5 w-px bg-gray-200 mx-1" />
+
+          {/* Collection mode toggle */}
+          <div className="flex text-xs border border-gray-200 rounded overflow-hidden">
+            <button
+              onClick={() => update('collectionMode', 'combined')}
+              className={`px-2.5 py-1 transition-colors ${
+                settings.collectionMode === 'combined'
+                  ? 'bg-gray-800 text-white'
+                  : 'text-gray-500 hover:bg-gray-50'
+              }`}
+            >
+              Combined
+            </button>
+            <button
+              onClick={() => update('collectionMode', 'separated')}
+              className={`px-2.5 py-1 border-l border-gray-200 transition-colors ${
+                settings.collectionMode === 'separated'
+                  ? 'bg-gray-800 text-white'
+                  : 'text-gray-500 hover:bg-gray-50'
+              }`}
+            >
+              Separated
+            </button>
+          </div>
 
           <div className="h-5 w-px bg-gray-200 mx-1" />
 
@@ -46,7 +96,6 @@ export default function TopBar({ stats, syncing, onSync, settings, onSettingsCha
             ))}
           </select>
 
-          {/* Slot count input — only shown when rule is "slots" */}
           {settings.spacingRule === 'slots' && (
             <input
               type="number"
@@ -74,11 +123,14 @@ export default function TopBar({ stats, syncing, onSync, settings, onSettingsCha
   )
 }
 
-function StatChip({ label, value }) {
+function StatChip({ label, value, sub, color }) {
   return (
     <div className="flex flex-col items-center px-3 py-1 bg-gray-50 rounded border border-gray-100 min-w-[64px]">
-      <span className="text-sm font-semibold leading-tight">{value}</span>
+      <span className="text-sm font-semibold leading-tight" style={color ? { color } : {}}>
+        {value}
+      </span>
       <span className="text-xs text-gray-400 leading-tight whitespace-nowrap">{label}</span>
+      {sub && <span className="text-xs text-gray-300 leading-tight whitespace-nowrap">{sub}</span>}
     </div>
   )
 }

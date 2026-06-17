@@ -13,19 +13,20 @@ const DEFAULT_SETTINGS = {
 }
 
 export default function App() {
-  const [sets, setSets] = useState([])
+  const [sets, setSets]           = useState([])
   const [manualSets, setManualSets] = useState([])
-  const [configs, setConfigs] = useState({})   // { setId: { intent, groupId } }
-  const [groups, setGroups] = useState({})     // { groupId: { id, name } }
-  const [settings, setSettings] = useState(() => {
+  const [configs, setConfigs]     = useState({})
+  // { setId: { intent, baseIntent, secretIntent, groupId } }
+  const [groups, setGroups]       = useState({})
+  const [settings, setSettings]   = useState(() => {
     try {
       return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem('bp_settings') || '{}') }
     } catch { return DEFAULT_SETTINGS }
   })
-  const [syncing, setSyncing] = useState(false)
-  const [error, setError] = useState(null)
+  const [syncing, setSyncing]     = useState(false)
+  const [error, setError]         = useState(null)
 
-  // Load all cached data on mount
+  // ── Persistence ───────────────────────────────────────────────────────────
   useEffect(() => {
     try {
       const s = localStorage.getItem('bp_sets')
@@ -39,13 +40,12 @@ export default function App() {
     } catch {}
   }, [])
 
-  // Persist everything on change
-  useEffect(() => { localStorage.setItem('bp_settings',     JSON.stringify(settings))    }, [settings])
-  useEffect(() => { localStorage.setItem('bp_configs',      JSON.stringify(configs))     }, [configs])
-  useEffect(() => { localStorage.setItem('bp_manual_sets',  JSON.stringify(manualSets))  }, [manualSets])
-  useEffect(() => { localStorage.setItem('bp_groups',       JSON.stringify(groups))      }, [groups])
+  useEffect(() => { localStorage.setItem('bp_settings',    JSON.stringify(settings))   }, [settings])
+  useEffect(() => { localStorage.setItem('bp_configs',     JSON.stringify(configs))    }, [configs])
+  useEffect(() => { localStorage.setItem('bp_manual_sets', JSON.stringify(manualSets)) }, [manualSets])
+  useEffect(() => { localStorage.setItem('bp_groups',      JSON.stringify(groups))     }, [groups])
 
-  // ── API sync ─────────────────────────────────────────────────────────────
+  // ── API sync ──────────────────────────────────────────────────────────────
   const syncSets = async () => {
     setSyncing(true)
     setError(null)
@@ -60,52 +60,43 @@ export default function App() {
     }
   }
 
-  // ── Intent ───────────────────────────────────────────────────────────────
+  // ── Intent handlers ───────────────────────────────────────────────────────
+  // Combined mode intent
   const updateIntent = (setId, intent) => {
-    setConfigs(prev => ({
-      ...prev,
-      [setId]: { ...prev[setId], intent: intent || null },
-    }))
+    setConfigs(prev => ({ ...prev, [setId]: { ...prev[setId], intent: intent || null } }))
+  }
+  // Separated mode intents
+  const updateBaseIntent = (setId, value) => {
+    setConfigs(prev => ({ ...prev, [setId]: { ...prev[setId], baseIntent: value || null } }))
+  }
+  const updateSecretIntent = (setId, value) => {
+    setConfigs(prev => ({ ...prev, [setId]: { ...prev[setId], secretIntent: value || null } }))
   }
 
-  // ── Groups ───────────────────────────────────────────────────────────────
-  // Returns the new group's id so callers can immediately assign sets to it
+  // ── Group handlers ────────────────────────────────────────────────────────
   const createGroup = (name) => {
     const id = `group-${Date.now()}`
     setGroups(prev => ({ ...prev, [id]: { id, name } }))
     return id
   }
-
   const renameGroup = (id, name) => {
     setGroups(prev => ({ ...prev, [id]: { ...prev[id], name } }))
   }
-
   const deleteGroup = (id) => {
-    setGroups(prev => {
-      const next = { ...prev }
-      delete next[id]
-      return next
-    })
-    // Clear groupId from all sets that belonged to this group
+    setGroups(prev => { const next = { ...prev }; delete next[id]; return next })
     setConfigs(prev => {
       const next = { ...prev }
       for (const setId of Object.keys(next)) {
-        if (next[setId]?.groupId === id) {
-          next[setId] = { ...next[setId], groupId: null }
-        }
+        if (next[setId]?.groupId === id) next[setId] = { ...next[setId], groupId: null }
       }
       return next
     })
   }
-
   const updateGroupMembership = (setId, groupId) => {
-    setConfigs(prev => ({
-      ...prev,
-      [setId]: { ...prev[setId], groupId: groupId || null },
-    }))
+    setConfigs(prev => ({ ...prev, [setId]: { ...prev[setId], groupId: groupId || null } }))
   }
 
-  // ── Manual sets ──────────────────────────────────────────────────────────
+  // ── Manual set handlers ───────────────────────────────────────────────────
   const addManualSet = (formData) => {
     const newSet = {
       ...formData,
@@ -115,7 +106,6 @@ export default function App() {
     }
     setManualSets(prev => [...prev, newSet])
   }
-
   const editManualSet = (id, formData) => {
     setManualSets(prev =>
       prev.map(s => s.id === id
@@ -124,39 +114,29 @@ export default function App() {
       )
     )
   }
-
   const deleteManualSet = (id) => {
     setManualSets(prev => prev.filter(s => s.id !== id))
-    setConfigs(prev => {
-      const next = { ...prev }
-      delete next[id]
-      return next
-    })
+    setConfigs(prev => { const next = { ...prev }; delete next[id]; return next })
   }
 
-  // ── Derived data ─────────────────────────────────────────────────────────
+  // ── Sorted + annotated sets ───────────────────────────────────────────────
   const setsWithConfig = useMemo(() => {
     const combined = [...sets, ...manualSets]
 
-    // Build group anchor dates: each group's position = earliest release date among its members
+    // Build anchor dates for groups
     const anchorDates = {}
     for (const s of combined) {
       const gid = configs[s.id]?.groupId
       if (gid && s.releaseDate) {
-        if (!anchorDates[gid] || s.releaseDate < anchorDates[gid]) {
-          anchorDates[gid] = s.releaseDate
-        }
+        if (!anchorDates[gid] || s.releaseDate < anchorDates[gid]) anchorDates[gid] = s.releaseDate
       }
     }
 
-    // Sort: grouped sets use anchor date; ungrouped sets use their own date
-    // Sets with no date sort last. Tie-break on own date (keeps group members ordered)
     combined.sort((a, b) => {
       const aGid = configs[a.id]?.groupId
       const bGid = configs[b.id]?.groupId
       const aDate = (aGid && anchorDates[aGid]) ? anchorDates[aGid] : (a.releaseDate ?? '')
       const bDate = (bGid && anchorDates[bGid]) ? anchorDates[bGid] : (b.releaseDate ?? '')
-
       if (!aDate && !bDate) return 0
       if (!aDate) return 1
       if (!bDate) return -1
@@ -166,21 +146,65 @@ export default function App() {
 
     return combined.map(s => ({
       ...s,
-      intent:  configs[s.id]?.intent  ?? null,
-      groupId: configs[s.id]?.groupId ?? null,
+      intent:       configs[s.id]?.intent       ?? null,
+      baseIntent:   configs[s.id]?.baseIntent   ?? null,
+      secretIntent: configs[s.id]?.secretIntent ?? null,
+      groupId:      configs[s.id]?.groupId      ?? null,
     }))
   }, [sets, manualSets, configs])
 
+  // ── Layout calculation ────────────────────────────────────────────────────
+  const isSeparated = settings.collectionMode === 'separated'
+
+  // Combined mode — single layout as before
   const binders = useMemo(
-    () => calculateLayout(setsWithConfig, settings),
-    [setsWithConfig, settings]
+    () => !isSeparated ? calculateLayout(setsWithConfig, settings) : [],
+    [setsWithConfig, settings, isSeparated]
   )
 
-  const stats = useMemo(() => ({
-    bindersNeeded: binders.length,
-    setsPlanned:   setsWithConfig.filter(s => s.intent && s.intent !== 'skip').length,
-    totalCards:    binders.reduce((sum, b) => sum + b.usedSlots, 0),
-  }), [binders, setsWithConfig])
+  // Separated mode — two independent layouts
+  // Base pool: sets where baseIntent === 'collect', treated as intent='base'
+  const baseBinders = useMemo(() => {
+    if (!isSeparated) return []
+    const baseSets = setsWithConfig
+      .filter(s => s.baseIntent === 'collect' && s.printedTotal > 0)
+      .map(s => ({ ...s, intent: 'base' }))
+    return calculateLayout(baseSets, settings)
+  }, [setsWithConfig, settings, isSeparated])
+
+  // Secrets pool: sets where secretIntent === 'collect', treated as intent='secret'
+  const secretBinders = useMemo(() => {
+    if (!isSeparated) return []
+    const secretSets = setsWithConfig
+      .filter(s => s.secretIntent === 'collect' && s.secretCount > 0)
+      .map(s => ({ ...s, intent: 'secret' }))
+    return calculateLayout(secretSets, settings)
+  }, [setsWithConfig, settings, isSeparated])
+
+  // ── Stats ─────────────────────────────────────────────────────────────────
+  const stats = useMemo(() => {
+    if (isSeparated) {
+      const baseCards    = baseBinders.reduce((s, b) => s + b.usedSlots, 0)
+      const secretCards  = secretBinders.reduce((s, b) => s + b.usedSlots, 0)
+      const setsPlanned  = setsWithConfig.filter(
+        s => s.baseIntent === 'collect' || s.secretIntent === 'collect'
+      ).length
+      return {
+        mode: 'separated',
+        baseBindersNeeded:   baseBinders.length,
+        secretBindersNeeded: secretBinders.length,
+        baseCards,
+        secretCards,
+        setsPlanned,
+      }
+    }
+    return {
+      mode: 'combined',
+      bindersNeeded: binders.length,
+      setsPlanned:   setsWithConfig.filter(s => s.intent && s.intent !== 'skip').length,
+      totalCards:    binders.reduce((s, b) => s + b.usedSlots, 0),
+    }
+  }, [binders, baseBinders, secretBinders, setsWithConfig, isSeparated])
 
   const hasSets = sets.length > 0 || manualSets.length > 0
 
@@ -208,7 +232,10 @@ export default function App() {
           <SetLibrary
             sets={setsWithConfig}
             groups={groups}
+            collectionMode={settings.collectionMode}
             onUpdateIntent={updateIntent}
+            onUpdateBaseIntent={updateBaseIntent}
+            onUpdateSecretIntent={updateSecretIntent}
             onUpdateGroupMembership={updateGroupMembership}
             onCreateGroup={createGroup}
             onRenameGroup={renameGroup}
@@ -217,7 +244,13 @@ export default function App() {
             onEditManualSet={editManualSet}
             onDeleteManualSet={deleteManualSet}
           />
-          <BinderGrid binders={binders} groups={groups} settings={settings} />
+          <BinderGrid
+            collectionMode={settings.collectionMode}
+            binders={binders}
+            baseBinders={baseBinders}
+            secretBinders={secretBinders}
+            groups={groups}
+          />
         </div>
       )}
     </div>

@@ -30,7 +30,10 @@ function groupColor(groupId) {
 export default function SetLibrary({
   sets,
   groups,
+  collectionMode,
   onUpdateIntent,
+  onUpdateBaseIntent,
+  onUpdateSecretIntent,
   onUpdateGroupMembership,
   onCreateGroup,
   onRenameGroup,
@@ -39,6 +42,7 @@ export default function SetLibrary({
   onEditManualSet,
   onDeleteManualSet,
 }) {
+  const isSeparated = collectionMode === 'separated'
   const [search, setSearch]           = useState('')
   const [seriesFilter, setSeriesFilter] = useState('All')
 
@@ -226,10 +230,13 @@ export default function SetLibrary({
                   set={set}
                   color={getSeriesColor(set.series)}
                   groups={groups}
+                  isSeparated={isSeparated}
                   selectMode={selectMode}
                   isSelected={selected.has(set.id)}
                   onToggleSelect={() => toggleSelect(set.id)}
                   onUpdateIntent={onUpdateIntent}
+                  onUpdateBaseIntent={onUpdateBaseIntent}
+                  onUpdateSecretIntent={onUpdateSecretIntent}
                   onUpdateGroupMembership={onUpdateGroupMembership}
                   onOpenRenameForm={(data) => setGroupForm(data)}
                   onDeleteGroup={onDeleteGroup}
@@ -314,10 +321,18 @@ function GroupPicker({ groups, onAssign, onRemove, onCreateNew, onClose }) {
 }
 
 // ── SetRow ────────────────────────────────────────────────────────────────────
+const POOL_INTENT_OPTIONS = [
+  { value: '',        label: '— not set —' },
+  { value: 'collect', label: 'Collect'     },
+  { value: 'skip',    label: 'Skip'        },
+]
+
 function SetRow({
   set, color, groups,
+  isSeparated,
   selectMode, isSelected, onToggleSelect,
-  onUpdateIntent, onUpdateGroupMembership,
+  onUpdateIntent, onUpdateBaseIntent, onUpdateSecretIntent,
+  onUpdateGroupMembership,
   onOpenRenameForm, onDeleteGroup,
   onEdit, onDelete,
 }) {
@@ -335,6 +350,7 @@ function SetRow({
     return () => document.removeEventListener('mousedown', handler)
   }, [showGroupMenu])
 
+  // Combined mode card count
   const cardCount =
     set.intent === 'master' ? set.total :
     set.intent === 'base'   ? set.printedTotal :
@@ -344,14 +360,19 @@ function SetRow({
   const group = set.groupId ? groups[set.groupId] : null
   const gc    = group ? groupColor(set.groupId) : null
 
+  // Dimming: combined uses intent=skip; separated dims only if both are skipped
+  const isDimmed = isSeparated
+    ? (set.baseIntent === 'skip' && set.secretIntent === 'skip')
+    : set.intent === 'skip'
+
   return (
     <div
       className={`px-2 py-1.5 border-b border-gray-50 transition-colors group cursor-pointer ${
         isSelected ? 'bg-blue-50' : 'hover:bg-gray-50'
-      } ${set.intent === 'skip' ? 'opacity-40' : ''}`}
+      } ${isDimmed ? 'opacity-40' : ''}`}
       onClick={selectMode ? onToggleSelect : undefined}
     >
-      {/* Row 1: checkbox (select mode) | color dot | name | edit/delete */}
+      {/* Row 1: checkbox | color dot | name | edit/delete */}
       <div className="flex items-center gap-1.5 mb-1">
         {selectMode && (
           <input
@@ -376,23 +397,66 @@ function SetRow({
         )}
       </div>
 
-      {/* Row 2: intent selector + card count */}
+      {/* Row 2: intent controls */}
       {!selectMode && (
-        <div className="flex items-center gap-1.5 pl-3.5">
-          <select
-            value={set.intent || ''}
-            onChange={e => onUpdateIntent(set.id, e.target.value)}
-            onClick={e => e.stopPropagation()}
-            className="flex-1 text-xs border border-gray-200 rounded px-1 py-0.5 bg-white"
-          >
-            {INTENT_OPTIONS.map(o => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-          {cardCount !== null && (
-            <span className="text-xs text-gray-400 flex-shrink-0 tabular-nums">{cardCount}</span>
-          )}
-        </div>
+        isSeparated ? (
+          // Separated mode: two dropdowns (base + secrets)
+          <div className="flex flex-col gap-1 pl-3.5">
+            {/* Base pool */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-blue-500 w-12 flex-shrink-0">Base</span>
+              <select
+                value={set.baseIntent || ''}
+                onChange={e => onUpdateBaseIntent(set.id, e.target.value)}
+                onClick={e => e.stopPropagation()}
+                className="flex-1 text-xs border border-gray-200 rounded px-1 py-0.5 bg-white"
+              >
+                {POOL_INTENT_OPTIONS.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+              {set.baseIntent === 'collect' && (
+                <span className="text-xs text-gray-400 tabular-nums flex-shrink-0">{set.printedTotal}</span>
+              )}
+            </div>
+            {/* Secrets pool — only shown if the set has secret rares */}
+            {set.secretCount > 0 && (
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs text-purple-500 w-12 flex-shrink-0">Secrets</span>
+                <select
+                  value={set.secretIntent || ''}
+                  onChange={e => onUpdateSecretIntent(set.id, e.target.value)}
+                  onClick={e => e.stopPropagation()}
+                  className="flex-1 text-xs border border-gray-200 rounded px-1 py-0.5 bg-white"
+                >
+                  {POOL_INTENT_OPTIONS.map(o => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+                {set.secretIntent === 'collect' && (
+                  <span className="text-xs text-gray-400 tabular-nums flex-shrink-0">{set.secretCount}</span>
+                )}
+              </div>
+            )}
+          </div>
+        ) : (
+          // Combined mode: single intent dropdown
+          <div className="flex items-center gap-1.5 pl-3.5">
+            <select
+              value={set.intent || ''}
+              onChange={e => onUpdateIntent(set.id, e.target.value)}
+              onClick={e => e.stopPropagation()}
+              className="flex-1 text-xs border border-gray-200 rounded px-1 py-0.5 bg-white"
+            >
+              {INTENT_OPTIONS.map(o => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+            {cardCount !== null && (
+              <span className="text-xs text-gray-400 flex-shrink-0 tabular-nums">{cardCount}</span>
+            )}
+          </div>
+        )
       )}
 
       {/* Row 3: group badge + manual label */}
