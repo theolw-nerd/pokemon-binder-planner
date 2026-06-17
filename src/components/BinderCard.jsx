@@ -1,7 +1,21 @@
 import { BINDER_TYPES } from '../utils/layoutEngine.js'
 import { getSeriesColor } from '../utils/colors.js'
 
-export default function BinderCard({ binder }) {
+// Same stable color palette as the group badges in SetLibrary
+const GROUP_COLORS = [
+  { bg: '#FEF3C7', border: '#F59E0B', text: '#92400E' },
+  { bg: '#CCFBF1', border: '#14B8A6', text: '#115E59' },
+  { bg: '#EDE9FE', border: '#8B5CF6', text: '#4C1D95' },
+  { bg: '#FFE4E6', border: '#F43F5E', text: '#881337' },
+  { bg: '#DBEAFE', border: '#3B82F6', text: '#1E3A8A' },
+  { bg: '#DCFCE7', border: '#22C55E', text: '#14532D' },
+]
+function groupColor(groupId) {
+  const idx = parseInt(groupId.replace(/\D/g, '') || '0') % GROUP_COLORS.length
+  return GROUP_COLORS[idx]
+}
+
+export default function BinderCard({ binder, groups }) {
   const config = BINDER_TYPES[binder.type]
   const fillPct = Math.round((binder.usedSlots / config.capacity) * 100)
 
@@ -42,6 +56,8 @@ export default function BinderCard({ binder }) {
           const startPage = Math.floor(set.startSlot / config.pageFaceSize) + 1
           const endPage   = Math.floor(set.endSlot   / config.pageFaceSize) + 1
           const pageRange = startPage === endPage ? `p${startPage}` : `p${startPage}–${endPage}`
+          const group = set.groupId && groups ? groups[set.groupId] : null
+          const gc = group ? groupColor(set.groupId) : null
 
           return (
             <div key={set.id} className="flex items-start gap-2">
@@ -53,8 +69,18 @@ export default function BinderCard({ binder }) {
                 <div className="text-xs font-medium leading-tight truncate" title={set.name}>
                   {set.name}
                 </div>
-                <div className="text-xs text-gray-400 tabular-nums">
-                  {set.cardCount} cards · {pageRange}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-xs text-gray-400 tabular-nums">
+                    {set.cardCount} cards · {pageRange}
+                  </span>
+                  {group && (
+                    <span
+                      className="text-xs font-medium px-1 py-px rounded border leading-none"
+                      style={{ background: gc.bg, borderColor: gc.border, color: gc.text }}
+                    >
+                      {group.name}
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
@@ -62,14 +88,13 @@ export default function BinderCard({ binder }) {
         })}
       </div>
 
-      {/* Visual slot map — shows every page face as a row of colored slots */}
+      {/* Visual slot map */}
       <SlotMap binder={binder} config={config} />
     </div>
   )
 }
 
 function SlotMap({ binder, config }) {
-  // Build a flat array of colors, one entry per slot
   const slots = new Array(config.capacity).fill(null)
   for (const set of binder.sets) {
     const color = getSeriesColor(set.series)
@@ -78,7 +103,6 @@ function SlotMap({ binder, config }) {
     }
   }
 
-  // Split into page faces (each page face = config.pageFaceSize slots)
   const totalFaces = config.capacity / config.pageFaceSize
   const pageFaces = Array.from({ length: totalFaces }, (_, p) =>
     slots.slice(p * config.pageFaceSize, (p + 1) * config.pageFaceSize)

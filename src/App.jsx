@@ -13,36 +13,39 @@ const DEFAULT_SETTINGS = {
 }
 
 export default function App() {
-  const [sets, setSets] = useState([])           // sets from the Pokémon TCG API
-  const [manualSets, setManualSets] = useState([]) // sets added manually by the user
-  const [configs, setConfigs] = useState({})     // user intent per set: { setId: { intent } }
+  const [sets, setSets] = useState([])
+  const [manualSets, setManualSets] = useState([])
+  const [configs, setConfigs] = useState({})   // { setId: { intent, groupId } }
+  const [groups, setGroups] = useState({})     // { groupId: { id, name } }
   const [settings, setSettings] = useState(() => {
     try {
       return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem('bp_settings') || '{}') }
-    } catch {
-      return DEFAULT_SETTINGS
-    }
+    } catch { return DEFAULT_SETTINGS }
   })
   const [syncing, setSyncing] = useState(false)
   const [error, setError] = useState(null)
 
-  // Load all cached data on first load
+  // Load all cached data on mount
   useEffect(() => {
     try {
       const s = localStorage.getItem('bp_sets')
       const m = localStorage.getItem('bp_manual_sets')
       const c = localStorage.getItem('bp_configs')
+      const g = localStorage.getItem('bp_groups')
       if (s) setSets(JSON.parse(s))
       if (m) setManualSets(JSON.parse(m))
       if (c) setConfigs(JSON.parse(c))
+      if (g) setGroups(JSON.parse(g))
     } catch {}
   }, [])
 
-  // Persist everything whenever it changes
-  useEffect(() => { localStorage.setItem('bp_settings', JSON.stringify(settings)) }, [settings])
-  useEffect(() => { localStorage.setItem('bp_configs', JSON.stringify(configs)) }, [configs])
-  useEffect(() => { localStorage.setItem('bp_manual_sets', JSON.stringify(manualSets)) }, [manualSets])
+  // Persist everything on change
+  useEffect(() => { localStorage.setItem('bp_settings',     JSON.stringify(settings))    }, [settings])
+  useEffect(() => { localStorage.setItem('bp_configs',      JSON.stringify(configs))     }, [configs])
+  useEffect(() => { localStorage.setItem('bp_manual_sets',  JSON.stringify(manualSets))  }, [manualSets])
+  useEffect(() => { localStorage.setItem('bp_groups',       JSON.stringify(groups))      }, [groups])
 
+  // ── API sync ─────────────────────────────────────────────────────────────
   const syncSets = async () => {
     setSyncing(true)
     setError(null)
@@ -57,8 +60,52 @@ export default function App() {
     }
   }
 
-  // --- Manual set handlers ---
+  // ── Intent ───────────────────────────────────────────────────────────────
+  const updateIntent = (setId, intent) => {
+    setConfigs(prev => ({
+      ...prev,
+      [setId]: { ...prev[setId], intent: intent || null },
+    }))
+  }
 
+  // ── Groups ───────────────────────────────────────────────────────────────
+  // Returns the new group's id so callers can immediately assign sets to it
+  const createGroup = (name) => {
+    const id = `group-${Date.now()}`
+    setGroups(prev => ({ ...prev, [id]: { id, name } }))
+    return id
+  }
+
+  const renameGroup = (id, name) => {
+    setGroups(prev => ({ ...prev, [id]: { ...prev[id], name } }))
+  }
+
+  const deleteGroup = (id) => {
+    setGroups(prev => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+    // Clear groupId from all sets that belonged to this group
+    setConfigs(prev => {
+      const next = { ...prev }
+      for (const setId of Object.keys(next)) {
+        if (next[setId]?.groupId === id) {
+          next[setId] = { ...next[setId], groupId: null }
+        }
+      }
+      return next
+    })
+  }
+
+  const updateGroupMembership = (setId, groupId) => {
+    setConfigs(prev => ({
+      ...prev,
+      [setId]: { ...prev[setId], groupId: groupId || null },
+    }))
+  }
+
+  // ── Manual sets ──────────────────────────────────────────────────────────
   const addManualSet = (formData) => {
     const newSet = {
       ...formData,
@@ -80,7 +127,6 @@ export default function App() {
 
   const deleteManualSet = (id) => {
     setManualSets(prev => prev.filter(s => s.id !== id))
-    // Clean up any saved intent for the deleted set
     setConfigs(prev => {
       const next = { ...prev }
       delete next[id]
@@ -88,28 +134,43 @@ export default function App() {
     })
   }
 
-  // --- Intent handler ---
-
-  const updateIntent = (setId, intent) => {
-    setConfigs(prev => ({
-      ...prev,
-      [setId]: { ...prev[setId], intent: intent || null },
-    }))
-  }
-
-  // Merge API sets + manual sets, sort by release date (no date → end), attach intents
+  // ── Derived data ─────────────────────────────────────────────────────────
   const setsWithConfig = useMemo(() => {
     const combined = [...sets, ...manualSets]
+
+    // Build group anchor dates: each group's position = earliest release date among its members
+    const anchorDates = {}
+    for (const s of combined) {
+      const gid = configs[s.id]?.groupId
+      if (gid && s.releaseDate) {
+        if (!anchorDates[gid] || s.releaseDate < anchorDates[gid]) {
+          anchorDates[gid] = s.releaseDate
+        }
+      }
+    }
+
+    // Sort: grouped sets use anchor date; ungrouped sets use their own date
+    // Sets with no date sort last. Tie-break on own date (keeps group members ordered)
     combined.sort((a, b) => {
-      if (!a.releaseDate && !b.releaseDate) return 0
-      if (!a.releaseDate) return 1
-      if (!b.releaseDate) return -1
-      return a.releaseDate.localeCompare(b.releaseDate)
+      const aGid = configs[a.id]?.groupId
+      const bGid = configs[b.id]?.groupId
+      const aDate = (aGid && anchorDates[aGid]) ? anchorDates[aGid] : (a.releaseDate ?? '')
+      const bDate = (bGid && anchorDates[bGid]) ? anchorDates[bGid] : (b.releaseDate ?? '')
+
+      if (!aDate && !bDate) return 0
+      if (!aDate) return 1
+      if (!bDate) return -1
+      if (aDate !== bDate) return aDate.localeCompare(bDate)
+      return (a.releaseDate ?? '').localeCompare(b.releaseDate ?? '')
     })
-    return combined.map(s => ({ ...s, intent: configs[s.id]?.intent ?? null }))
+
+    return combined.map(s => ({
+      ...s,
+      intent:  configs[s.id]?.intent  ?? null,
+      groupId: configs[s.id]?.groupId ?? null,
+    }))
   }, [sets, manualSets, configs])
 
-  // Compute binder layout whenever sets or settings change
   const binders = useMemo(
     () => calculateLayout(setsWithConfig, settings),
     [setsWithConfig, settings]
@@ -117,8 +178,8 @@ export default function App() {
 
   const stats = useMemo(() => ({
     bindersNeeded: binders.length,
-    setsPlanned: setsWithConfig.filter(s => s.intent && s.intent !== 'skip').length,
-    totalCards: binders.reduce((sum, b) => sum + b.usedSlots, 0),
+    setsPlanned:   setsWithConfig.filter(s => s.intent && s.intent !== 'skip').length,
+    totalCards:    binders.reduce((sum, b) => sum + b.usedSlots, 0),
   }), [binders, setsWithConfig])
 
   const hasSets = sets.length > 0 || manualSets.length > 0
@@ -146,12 +207,17 @@ export default function App() {
         <div className="flex flex-1 overflow-hidden">
           <SetLibrary
             sets={setsWithConfig}
+            groups={groups}
             onUpdateIntent={updateIntent}
+            onUpdateGroupMembership={updateGroupMembership}
+            onCreateGroup={createGroup}
+            onRenameGroup={renameGroup}
+            onDeleteGroup={deleteGroup}
             onAddManualSet={addManualSet}
             onEditManualSet={editManualSet}
             onDeleteManualSet={deleteManualSet}
           />
-          <BinderGrid binders={binders} settings={settings} />
+          <BinderGrid binders={binders} groups={groups} settings={settings} />
         </div>
       )}
     </div>
@@ -164,11 +230,8 @@ function EmptyState({ onSync, syncing }) {
       <div className="text-5xl select-none">🎴</div>
       <p className="text-base font-medium text-gray-700">No sets loaded yet</p>
       <p className="text-sm text-gray-400">Sync to pull the latest Pokémon TCG set data</p>
-      <button
-        onClick={onSync}
-        disabled={syncing}
-        className="mt-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-      >
+      <button onClick={onSync} disabled={syncing}
+        className="mt-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
         {syncing ? 'Syncing…' : '⟳  Sync sets now'}
       </button>
     </div>
